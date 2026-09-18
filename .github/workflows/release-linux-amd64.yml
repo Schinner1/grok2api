@@ -1,0 +1,108 @@
+name: Release Linux amd64
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release 标签版本号 (留空则自动读取仓库 VERSION 文件，例如 v3.1.5)'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'
+
+# 必须声明写入权限，否则创建 Release 会报 403 权限错误
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 1. 自动计算 Release 版本号（对齐原版）
+      - name: Determine Version
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            VERSION="${{ github.event.inputs.tag_name }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${{ github.ref_name }}"
+          elif [ -f "VERSION" ]; then
+            # 自动提取原版项目根目录 VERSION 文件的内容
+            RAW_VER=$(cat VERSION | tr -d '[:space:]')
+            if [[ "$RAW_VER" =~ ^v ]]; then
+              VERSION="${RAW_VER}"
+            else
+              VERSION="v${RAW_VER}"
+            fi
+          else
+            VERSION="v$(date +'%Y.%m.%d')"
+          fi
+
+          echo "RELEASE_TAG=${VERSION}" >> $GITHUB_ENV
+          echo "确定发布版本号为: ${VERSION}"
+
+      # 2. 构建前端静态资源
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: latest
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      # 3. 静态编译 Go 后端（指定 backend/go.sum 消除之前的缓存警告）
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: backend/go.sum
+
+      - name: Build Backend Binary
+        run: |
+          cd backend
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -buildvcs=false \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o grok2api ./cmd/grok2api
+
+      # 4. 组装归档包
+      - name: Package Artifacts
+        run: |
+          mkdir -p package/frontend package/data
+          mv backend/grok2api package/
+          cp -r frontend/dist package/frontend/
+          if [ -f config.example.yaml ]; then
+            cp config.example.yaml package/config.example.yaml
+          fi
+          # 打包产物
+          tar -czvf grok2api-linux-amd64.tar.gz -C package .
+
+      # 5. 发布到 GitHub Releases
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Grok2API ${{ env.RELEASE_TAG }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          files: grok2api-linux-amd64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
