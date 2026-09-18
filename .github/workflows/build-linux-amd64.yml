@@ -1,0 +1,78 @@
+name: Build Linux amd64 Release
+
+on:
+  workflow_dispatch: # 支持手动一键触发构建
+  push:
+    tags:
+      - 'v*' # 推送以 v 开头的 tag 时自动触发打包
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. 配置 Node.js 与 pnpm 并构建前端静态页面
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: latest
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      # 2. 配置 Go 并进行无 CGO 的 Linux amd64 静态交叉编译
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Backend Binary
+        run: |
+          cd backend
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -buildvcs=false \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o grok2api ./cmd/grok2api
+
+      # 3. 整理打包所需的产物（二进制 + 前端静态文件 + 示例配置）
+      - name: Package Artifacts
+        run: |
+          mkdir -p package/frontend package/data
+          # 拷贝二进制
+          mv backend/grok2api package/
+          # 拷贝前端产物
+          cp -r frontend/dist package/frontend/
+          # 拷贝配置文件模板（根目录如有 config.example.yaml）
+          if [ -f config.example.yaml ]; then
+            cp config.example.yaml package/config.example.yaml
+          fi
+          # 压缩为 tar.gz
+          tar -czvf grok2api-linux-amd64.tar.gz -C package .
+
+      # 4. 将压缩包上传为 GitHub Actions 构件（可在 Actions 页面直接下载）
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok2api-linux-amd64
+          path: grok2api-linux-amd64.tar.gz
+
+      # 5. 如果是打 tag，自动创建 GitHub Release
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: grok2api-linux-amd64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
